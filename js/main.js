@@ -1,4 +1,3 @@
-
 /* Wexen — site behaviour (plain JavaScript, no dependencies) */
 (function () {
   "use strict";
@@ -41,11 +40,9 @@
     var SCRIPT_URL = String((window.WEXEN_SHEET && window.WEXEN_SHEET.scriptUrl) || "").trim();
     var isConfigured = /^https:\/\/script\.google\.com\//.test(SCRIPT_URL) && SCRIPT_URL.indexOf("PASTE_YOUR") === -1;
     var submitButton = form.querySelector(".form-submit");
-    var submitLabel = form.querySelector(".form-submit-label");
     var statusBox = form.querySelector(".form-status");
-    var defaultLabel = submitLabel ? submitLabel.textContent : "Send Request";
-    var sending = false;
-    var pendingId = null; // kept until success so a retry cannot create a duplicate row
+    var busy = false;
+    var retryId = null; // set only after a failed send, so a retry of the same message is not saved twice
 
     var newId = function () {
       if (window.crypto && typeof window.crypto.randomUUID === "function") return window.crypto.randomUUID();
@@ -66,19 +63,19 @@
       statusBox.className = "form-status";
     };
 
-    var setSending = function (state) {
-      sending = state;
+    var setBusy = function (state) {
+      busy = state;
       if (submitButton) submitButton.disabled = state;
-      if (submitLabel) submitLabel.textContent = state ? "Sending…" : defaultLabel;
     };
 
     var post = function (payload, noCors) {
       var controller = typeof AbortController === "function" ? new AbortController() : null;
-      var timer = controller ? setTimeout(function () { controller.abort(); }, 20000) : null;
+      var timer = controller ? setTimeout(function () { controller.abort(); }, 25000) : null;
       return fetch(SCRIPT_URL, {
         method: "POST",
         mode: noCors ? "no-cors" : "cors",
         redirect: "follow",
+        keepalive: true, // lets the request finish even if the visitor closes or leaves the page
         // text/plain avoids a CORS preflight, which Apps Script cannot answer
         headers: { "Content-Type": "text/plain;charset=utf-8" },
         body: JSON.stringify(payload),
@@ -108,9 +105,16 @@
         });
     };
 
+    var restoreFields = function (values) {
+      Object.keys(values).forEach(function (key) {
+        var field = form.elements[key];
+        if (field && !field.value) field.value = values[key];
+      });
+    };
+
     form.addEventListener("submit", function (event) {
       event.preventDefault();
-      if (sending) return;
+      if (busy) return;
       hideStatus();
 
       if (!form.checkValidity()) {
@@ -125,36 +129,45 @@
       }
 
       var data = new FormData(form);
-      if (!pendingId) pendingId = newId();
-      var payload = {
-        id: pendingId,
+      var values = {
         name: String(data.get("name") || "").trim(),
         email: String(data.get("email") || "").trim(),
-        work: String(data.get("work") || "").trim(),
-        hp_field: String(data.get("hp_field") || ""),
-        page: window.location.href
+        work: String(data.get("work") || "").trim()
+      };
+      var id = retryId || newId();
+      retryId = null;
+      var payload = {
+        id: id,
+        name: values.name,
+        email: values.email,
+        work: values.work,
+        hp_field: String(data.get("hp_field") || "")
       };
 
-      setSending(true);
-      send(payload)
-        .then(function () {
-          pendingId = null;
-          showStatus("success", "Thank you. We have received your request and will get back to you soon.");
-          // Keep the thank-you visible for 3 seconds, then reset the form.
-          setTimeout(function () {
-            form.reset();
-            hideStatus();
-            setSending(false);
-          }, 3000);
-        })
-        .catch(function (err) {
-          console.error("Wexen form error:", err);
-          var message = err && err.fromServer
-            ? err.message
-            : "Something went wrong and your message was not sent. Please try again, or email us at " + CONTACT_EMAIL + ".";
-          showStatus("error", message);
-          setSending(false);
-        });
+      // Instant feedback: confirm right away and send in the background.
+      // If sending fails, the message comes back and the fields are filled in again.
+      setBusy(true);
+      showStatus("success", "Thank you. We have received your request and will get back to you soon.");
+      var failed = false;
+
+      send(payload).catch(function (err) {
+        failed = true;
+        retryId = id; // sending the same message again will not create a duplicate row
+        console.error("Wexen form error:", err);
+        restoreFields(values);
+        showStatus("error", err && err.fromServer
+          ? err.message
+          : "Something went wrong and your message was not sent. Please try again, or email us at " + CONTACT_EMAIL + ".");
+        setBusy(false);
+      });
+
+      // Keep the thank-you visible for 3 seconds, then reset the form.
+      setTimeout(function () {
+        if (failed) return;
+        form.reset();
+        hideStatus();
+        setBusy(false);
+      }, 3000);
     });
   }
 })();
